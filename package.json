@@ -1,0 +1,30 @@
+{
+  "name": "tax-payment-system",
+  "version": "1.0.0",
+  "description": "AfricasTalking Project on Taxpaying System that can be used in Open Stall Markets",
+  "homepage": "https://github.com/adonis-dave/Tax-Payment-System#readme",
+  "bugs": {
+    "url": "https://github.com/adonis-dave/Tax-Payment-System/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adonis-dave/Tax-Payment-System.git"
+  },
+  "license": "ISC",
+  "author": "David Denis",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "africastalking": "^0.7.4",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "ngrok": "^5.0.0-beta.2",
+    "nodemon": "^3.1.10",
+    "pg": "^8.16.3"
+  }
+}
