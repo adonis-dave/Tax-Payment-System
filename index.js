@@ -9,26 +9,18 @@ app.use(express.urlencoded({ extended: false }));
 require("dotenv").config();
 
 const pool = new Pool({
-  user: "postgres",
-  host: "localhost",
-  database: "agriconnect drone hub",
-  password: "mi vida",
-  port: 5432,
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
 });
 
-//  fast-api coonection link
-// const 
-
-const calculateDronesAndPrice = (plotSize, droneCoverage, pricePerDrone) => {
-  const numberOfDrones = Math.ceil(plotSize / droneCoverage);
-  const totalPricePerHour = numberOfDrones * pricePerDrone;
-  return { numberOfDrones, totalPricePerHour };
-};
 
 const getUserByPhoneNumber = async (phoneNumber) => {
   try {
     const result = await pool.query(
-      "SELECT id, name, email FROM users WHERE phone_number = $1",
+      "SELECT id, name FROM users WHERE phone_number = $1",
       [phoneNumber]
     );
     return result.rows.length ? result.rows[0] : null;
@@ -42,9 +34,9 @@ const fetchAndSendPaymentHistory = async (userId, phoneNumber) => {
   try {
     // Query to fetch payment history for the last 3 days
     const result = await pool.query(
-      `SELECT id, amount, payment_method, transaction_id, status 
+      `SELECT payment_id, amount, payment_method, transaction_id, status 
        FROM payments 
-       WHERE id = $1 AND created_at >= NOW() - INTERVAL '3 days'
+       WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '3 days'
        ORDER BY created_at DESC`,
       [userId]
     );
@@ -75,32 +67,32 @@ const fetchAndSendPaymentHistory = async (userId, phoneNumber) => {
   }
 };
 
-const checkAvailableStalls = async () => {
+const checkAvailableStalls = async (session, input) => {
   try {
+    // Fetch available stalls from the database
     const result = await pool.query(
-      `SELECT id, stall_number 
+      `SELECT stall_number 
        FROM stalls 
        WHERE is_available = TRUE 
        ORDER BY stall_number ASC`
     );
 
-    if (result.rows.length) {
-      return {
-        status: "available",
-        stalls: result.rows,
-      };
-    }
+    if (result.rows.length > 0) {
+      // Format the available stalls for display
+      const stallOptions = result.rows
+        .map((stall, index) => `${index + 1}. ${stall.stall_number}`)
+        .join("\n");
 
-    return {
-      status: "not_available",
-      message: "Currently, there are no open stalls available for rent.",
-    };
+      session.state = "select_stall";
+      session.stalls = result.rows; // Save stalls in session for later use
+
+      return `CON Available stalls for purchase:\n${stallOptions}\nSelect a stall by entering its number:`;
+    } else {
+      return `END No stalls are currently available for purchase.`;
+    }
   } catch (error) {
     console.error("Database error (checkAvailableStalls):", error);
-    return {
-      status: "error",
-      message: "Error fetching available stalls. Please try again later.",
-    };
+    return `END Error fetching available stalls. Please try again later.`;
   }
 };
 
@@ -193,25 +185,8 @@ app.post("/ussd", async (req, res) => {
           4. 004-D
           5. Next`;
       } else if (input === "2") {
-        const stallStatus = await checkAvailableStalls();
-        if (stallStatus.status === "available") {
-          const stallOptions = stallStatus.stalls
-            .map(
-              (stall, index) =>
-                `${index + 1}. Stall ${stall.stall_number}`
-            )
-            .join("\n");
-
-          response = `CON Available stalls for rent:\n${stallOptions}\nSelect a stall by entering its number:`;
-          session.state = "select_stall";
-          session.stalls = stallStatus.stalls;
-        } else if (stallStatus.status === "not_available") {
-          response = `END ${stallStatus.message}`;
-          delete userSessions[sessionId];
-        } else {
-          response = `END ${stallStatus.message}`;
-          delete userSessions[sessionId];
-        }
+        // Call the checkAvailableStalls function
+        response = await checkAvailableStalls(session, input);
       } else if (input === "3") {
         session.state = "payment_history";
         session.userId = user.id;
@@ -239,15 +214,32 @@ app.post("/ussd", async (req, res) => {
     if (
       isNaN(selectedIndex) ||
       selectedIndex < 0 ||
-      selectedIndex >= 4
+      selectedIndex >= session.stalls.length
     ) {
       response = `CON Invalid selection. Please select a valid stall number:`;
     } else {
-      session.selectedStall = `00${selectedIndex + 1}-${String.fromCharCode(65 + selectedIndex)}`;
-      session.state = "confirm_payment";
-      response = `CON You have selected Stall ${session.selectedStall}. Unakaribia kulipa 1000 Tsh kwaajili ya ushuru. Unathibitisha?
-        1. Yes
-        2. No`;
+      const selectedStall = session.stalls[selectedIndex].stall_number;
+
+      try {
+        // Mark the selected stall as unavailable in the database
+        await pool.query(
+          "UPDATE stalls SET is_available = FALSE WHERE stall_number = $1",
+          [selectedStall]
+        );
+
+        // Send SMS confirmation
+        await sendSMS(
+          phoneNumber,
+          `You have successfully reserved Stall ${selectedStall}. Thank you for using Mwenge Market!`
+        );
+
+        response = `END You have successfully reserved Stall ${selectedStall}. Thank you!`;
+        delete userSessions[sessionId];
+      } catch (error) {
+        console.error("Database error (reserve stall):", error);
+        response = `END Error reserving the stall. Please try again later.`;
+        delete userSessions[sessionId];
+      }
     }
   } else if (session.state === "confirm_payment") {
     if (input === "1") {
@@ -268,11 +260,12 @@ app.post("/ussd", async (req, res) => {
     if (enteredPin === validPin) {
       try {
         const transactionId = uuidv4(); // Generate a unique transaction ID
+        const paymentId = uuidv4(); // Generate a unique payment ID
 
         // Insert payment record into the database
         await pool.query(
-          "INSERT INTO payments (amount, payment_method, transaction_id, status) VALUES ($1, $2, $3, $4)",
-          [1000, "USSD", transactionId, "SUCCESS"]
+          "INSERT INTO payments (payment_id, amount, transaction_id, status) VALUES ($1, $2, $3, $4)",
+          [paymentId, 1000, transactionId, "SUCCESS"]
         );
 
         // Send SMS confirmation
